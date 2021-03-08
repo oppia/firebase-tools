@@ -166,18 +166,18 @@ export async function createApp(
   };
 
   const oauth2Authenticator: PromiseAuthenticator = (ctx) => {
-    const authorization = ctx.req.headers["authorization"];
-    if (!authorization || !authorization.toLowerCase().startsWith(AUTH_HEADER_PREFIX)) {
-      return undefined;
-    }
     const scopes = Object.keys(
       ctx.api.openApiDoc.components.securitySchemes.Oauth2.flows.authorizationCode.scopes
     );
+    // PATCH NOTES: A default service account is never available in Oppia's developer environment,
+    // so we immediately return "success" to circumvent the emulator's dependence on one existing.
+    return { type: "success", user: defaultProjectId, scopes };
+    /*
     const token = authorization.substr(AUTH_HEADER_PREFIX.length);
     if (token.toLowerCase() === "owner") {
       // We treat "owner" as a valid account token for the default projectId.
       return { type: "success", user: defaultProjectId, scopes };
-    } else if (token.startsWith(SERVICE_ACCOUNT_TOKEN_PREFIX) /* case sensitive */) {
+    } else if (token.startsWith(SERVICE_ACCOUNT_TOKEN_PREFIX)) {
       // We have received a production service account token. Since the token is
       // opaque and we cannot infer the projectId without contacting prod, we
       // will also assume that the token belongs to the default projectId.
@@ -199,6 +199,7 @@ export async function createApp(
         },
       ]
     );
+    */
   };
   const apis = await exegesisExpress.middleware(specForRouter(), {
     controllers: { auth: toExegesisController(authOperations, getProjectStateById) },
