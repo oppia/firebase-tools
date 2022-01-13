@@ -1,3 +1,4 @@
+import * as cors from "cors";
 import * as express from "express";
 import * as os from "os";
 import * as fs from "fs";
@@ -69,6 +70,9 @@ export class EmulatorHub implements EmulatorInstance {
 
   constructor(private args: EmulatorHubArgs) {
     this.hub = express();
+    // Enable CORS for all APIs, all origins (reflected), and all headers (reflected).
+    // Safe since all Hub APIs are cookieless.
+    this.hub.use(cors({ origin: true }));
     this.hub.use(bodyParser.json());
 
     this.hub.get("/", (req, res) => {
@@ -95,7 +99,7 @@ export class EmulatorHub implements EmulatorInstance {
         res.status(200).send({
           message: "OK",
         });
-      } catch (e) {
+      } catch (e: any) {
         const errorString = e.message || JSON.stringify(e);
         utils.logLabeledWarning("emulators", `Export failed: ${errorString}`);
         res.status(500).json({

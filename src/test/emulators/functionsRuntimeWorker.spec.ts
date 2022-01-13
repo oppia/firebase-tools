@@ -4,7 +4,6 @@ import { EventEmitter } from "events";
 import {
   FunctionsRuntimeArgs,
   FunctionsRuntimeBundle,
-  EmulatedTriggerType,
 } from "../../emulator/functionsEmulatorShared";
 import {
   RuntimeWorker,
@@ -91,7 +90,6 @@ class WorkerStateCounter {
 
 class MockRuntimeBundle implements FunctionsRuntimeBundle {
   projectId = "project-1234";
-  triggerType = EmulatedTriggerType.HTTPS;
   cwd = "/home/users/dir";
   emulators = {};
   adminSdkConfig = {
@@ -100,7 +98,7 @@ class MockRuntimeBundle implements FunctionsRuntimeBundle {
     storageBucket: "project-1234.appspot.com",
   };
 
-  constructor(public triggerId: string) {}
+  constructor(public triggerId: string, public targetName: string) {}
 }
 
 describe("FunctionsRuntimeWorker", () => {
@@ -111,7 +109,7 @@ describe("FunctionsRuntimeWorker", () => {
       const worker = new RuntimeWorker(workerPool.getKey("trigger"), new MockRuntimeInstance(true));
       const counter = new WorkerStateCounter(worker);
 
-      worker.execute(new MockRuntimeBundle("trigger"));
+      worker.execute(new MockRuntimeBundle("region-trigger", "trigger-name"));
       await worker.waitForDone();
 
       expect(counter.counts.BUSY).to.eql(1);
@@ -126,7 +124,7 @@ describe("FunctionsRuntimeWorker", () => {
       );
       const counter = new WorkerStateCounter(worker);
 
-      worker.execute(new MockRuntimeBundle("trigger"));
+      worker.execute(new MockRuntimeBundle("region-trigger", "trigger-name"));
       await worker.waitForDone();
 
       expect(counter.counts.IDLE).to.eql(1);
@@ -139,7 +137,7 @@ describe("FunctionsRuntimeWorker", () => {
       const worker = new RuntimeWorker(workerPool.getKey("trigger"), new MockRuntimeInstance(true));
       const counter = new WorkerStateCounter(worker);
 
-      worker.execute(new MockRuntimeBundle("trigger"));
+      worker.execute(new MockRuntimeBundle("region-trigger", "trigger-name"));
       worker.state = RuntimeWorkerState.FINISHING;
       await worker.waitForDone();
 
@@ -154,7 +152,7 @@ describe("FunctionsRuntimeWorker", () => {
   describe("RuntimeWorkerPool", () => {
     it("properly manages a single worker", async () => {
       const pool = new RuntimeWorkerPool();
-      const trigger = "trigger1";
+      const trigger = "region-trigger1";
 
       // No idle workers to begin
       expect(pool.getIdleWorker(trigger)).to.be.undefined;
@@ -166,7 +164,7 @@ describe("FunctionsRuntimeWorker", () => {
       expect(pool.getIdleWorker(trigger)).to.eql(worker);
 
       // Make the worker busy, confirm nothing is idle
-      worker.execute(new MockRuntimeBundle(trigger));
+      worker.execute(new MockRuntimeBundle(trigger, "targetName"));
       expect(pool.getIdleWorker(trigger)).to.be.undefined;
 
       // When the worker is finished work, confirm it's idle again
@@ -186,7 +184,7 @@ describe("FunctionsRuntimeWorker", () => {
       expect(pool.getIdleWorker(trigger)).to.eql(worker);
 
       // Make the worker execute (and fail)
-      worker.execute(new MockRuntimeBundle(trigger));
+      worker.execute(new MockRuntimeBundle(trigger, "targetName"));
       await worker.waitForDone();
 
       // Confirm there are no idle workers
@@ -203,7 +201,7 @@ describe("FunctionsRuntimeWorker", () => {
       const idleWorker = pool.addWorker(trigger, new MockRuntimeInstance(true));
       const idleWorkerCounter = new WorkerStateCounter(idleWorker);
 
-      busyWorker.execute(new MockRuntimeBundle(trigger));
+      busyWorker.execute(new MockRuntimeBundle(trigger, "targetName"));
       pool.exit();
 
       await busyWorker.waitForDone();
@@ -229,7 +227,7 @@ describe("FunctionsRuntimeWorker", () => {
       const idleWorker = pool.addWorker(trigger, new MockRuntimeInstance(true));
       const idleWorkerCounter = new WorkerStateCounter(idleWorker);
 
-      busyWorker.execute(new MockRuntimeBundle(trigger));
+      busyWorker.execute(new MockRuntimeBundle(trigger, "targetName"));
       pool.refresh();
 
       await busyWorker.waitForDone();
@@ -245,13 +243,13 @@ describe("FunctionsRuntimeWorker", () => {
     });
 
     it("gives assigns all triggers to the same worker in sequential mode", async () => {
-      const trigger1 = "abc";
-      const trigger2 = "def";
+      const trigger1 = "region-abc";
+      const trigger2 = "region-def";
 
       const pool = new RuntimeWorkerPool(FunctionsExecutionMode.SEQUENTIAL);
       const worker = pool.addWorker(trigger1, new MockRuntimeInstance(true));
 
-      pool.submitWork(trigger2, new MockRuntimeBundle(trigger2));
+      pool.submitWork(trigger2, new MockRuntimeBundle(trigger2, "def"));
 
       expect(pool.readyForWork(trigger1)).to.be.false;
       expect(pool.readyForWork(trigger2)).to.be.false;

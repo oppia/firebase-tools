@@ -8,6 +8,14 @@ import { firebaseApiOrigin } from "../api";
 import { FirebaseError } from "../error";
 
 describe("fetchWebSetup module", () => {
+  before(() => {
+    nock.disableNetConnect();
+  });
+
+  after(() => {
+    nock.enableNetConnect();
+  });
+
   afterEach(() => {
     expect(nock.isDone()).to.be.true;
   });
@@ -62,6 +70,17 @@ describe("fetchWebSetup module", () => {
         FirebaseError,
         "Not Found"
       );
+    });
+
+    it("should return a fake config for a demo project id", async () => {
+      const projectId = "demo-project-1234";
+      await expect(fetchWebSetup({ project: projectId })).to.eventually.deep.equal({
+        projectId: "demo-project-1234",
+        databaseURL: "https://demo-project-1234.firebaseio.com",
+        storageBucket: "demo-project-1234.appspot.com",
+        apiKey: "fake-api-key",
+        authDomain: "demo-project-1234.firebaseapp.com",
+      });
     });
   });
 

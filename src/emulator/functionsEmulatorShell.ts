@@ -1,9 +1,9 @@
 import * as uuid from "uuid";
-import { FunctionsEmulator } from "./functionsEmulator";
+import { EmulatableBackend, FunctionsEmulator } from "./functionsEmulator";
 import {
   EmulatedTriggerDefinition,
-  EmulatedTriggerType,
-  getFunctionRegion,
+  getSignatureType,
+  SignatureType,
 } from "./functionsEmulatorShared";
 import * as utils from "../utils";
 import { logger } from "../logger";
@@ -19,23 +19,21 @@ export class FunctionsEmulatorShell implements FunctionsShellController {
   emulatedFunctions: string[];
   urls: { [name: string]: string } = {};
 
-  constructor(private emu: FunctionsEmulator) {
+  constructor(private emu: FunctionsEmulator, private backend: EmulatableBackend) {
     this.triggers = emu.getTriggerDefinitions();
-    this.emulatedFunctions = this.triggers.map((t) => t.name);
+    this.emulatedFunctions = this.triggers.map((t) => t.id);
 
     const entryPoints = this.triggers.map((t) => t.entryPoint);
     utils.logLabeledBullet("functions", `Loaded functions: ${entryPoints.join(", ")}`);
 
     for (const trigger of this.triggers) {
-      const name = trigger.name;
-
       if (trigger.httpsTrigger) {
-        this.urls[name] = FunctionsEmulator.getHttpFunctionUrl(
+        this.urls[trigger.id] = FunctionsEmulator.getHttpFunctionUrl(
           this.emu.getInfo().host,
           this.emu.getInfo().port,
           this.emu.getProjectId(),
-          name,
-          getFunctionRegion(trigger)
+          trigger.name,
+          trigger.region
         );
       }
     }
@@ -70,7 +68,13 @@ export class FunctionsEmulatorShell implements FunctionsShellController {
       data,
     };
 
-    this.emu.startFunctionRuntime(name, EmulatedTriggerType.BACKGROUND, proto);
+    this.emu.startFunctionRuntime(
+      this.backend,
+      trigger.id,
+      trigger.name,
+      getSignatureType(trigger),
+      proto
+    );
   }
 
   private getTrigger(name: string): EmulatedTriggerDefinition {

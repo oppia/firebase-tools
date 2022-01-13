@@ -7,7 +7,7 @@ import { logger } from "./logger";
 import { FirebaseError } from "./error";
 import utils = require("./utils");
 
-import { prompt } from "./prompt";
+import { promptOnce } from "./prompt";
 import { ListRulesetsEntry, Release, RulesetFile } from "./gcp/rules";
 
 // The status code the Firebase Rules backend sends to indicate too many rulesets.
@@ -64,7 +64,7 @@ export class RulesDeploy {
     let src;
     try {
       src = fs.readFileSync(fullPath, "utf8");
-    } catch (e) {
+    } catch (e: any) {
       logger.debug("[rules read error]", e.stack);
       throw new FirebaseError("Error reading rules file " + clc.bold(path));
     }
@@ -113,10 +113,8 @@ export class RulesDeploy {
   async createRulesets(service: RulesetServiceType): Promise<string[]> {
     const createdRulesetNames: string[] = [];
 
-    const {
-      latestName: latestRulesetName,
-      latestContent: latestRulesetContent,
-    } = await this.getCurrentRules(service);
+    const { latestName: latestRulesetName, latestContent: latestRulesetContent } =
+      await this.getCurrentRules(service);
 
     // TODO: Make this into a more useful helper method.
     // Gather the files to be uploaded.
@@ -145,7 +143,7 @@ export class RulesDeploy {
         this.rulesetNames[filename] = await rulesetName;
         createdRulesetNames.push(await rulesetName);
       }
-    } catch (err) {
+    } catch (err: any) {
       if (err.status !== QUOTA_EXCEEDED_STATUS_CODE) {
         throw err;
       }
@@ -157,20 +155,16 @@ export class RulesDeploy {
       const history: ListRulesetsEntry[] = await gcp.rules.listAllRulesets(this.options.project);
 
       if (history.length > RULESET_COUNT_LIMIT) {
-        const answers = await prompt(
+        const confirm = await promptOnce(
           {
-            confirm: this.options.force,
+            type: "confirm",
+            name: "force",
+            message: `You have ${history.length} rules, do you want to delete the oldest ${RULESETS_TO_GC} to free up space?`,
+            default: false,
           },
-          [
-            {
-              type: "confirm",
-              name: "confirm",
-              message: `You have ${history.length} rules, do you want to delete the oldest ${RULESETS_TO_GC} to free up space?`,
-              default: false,
-            },
-          ]
+          this.options
         );
-        if (answers.confirm) {
+        if (confirm) {
           // Find the oldest unreleased rulesets. The rulesets are sorted reverse-chronlogically.
           const releases: Release[] = await gcp.rules.listAllReleases(this.options.project);
           const unreleased: ListRulesetsEntry[] = _.reject(

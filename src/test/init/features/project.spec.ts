@@ -6,7 +6,7 @@ import { configstore } from "../../../configstore";
 import { doSetup } from "../../../init/features/project";
 import * as projectManager from "../../../management/projects";
 import * as prompt from "../../../prompt";
-import * as Config from "../../../config";
+import { Config } from "../../../config";
 
 const TEST_FIREBASE_PROJECT: projectManager.FirebaseProjectMetadata = {
   projectId: "my-project-123",
@@ -115,7 +115,7 @@ describe("project", () => {
         let err;
         try {
           await doSetup(setup, emptyConfig, options);
-        } catch (e) {
+        } catch (e: any) {
           err = e;
         }
 
@@ -159,7 +159,7 @@ describe("project", () => {
         let err;
         try {
           await doSetup(setup, emptyConfig, options);
-        } catch (e) {
+        } catch (e: any) {
           err = e;
         }
 

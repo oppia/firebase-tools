@@ -1,29 +1,41 @@
+import * as fs from "fs";
+
 import { EmulatorLog } from "./types";
 import { CloudFunction, DeploymentOptions, https } from "firebase-functions";
 import {
+  ParsedTriggerDefinition,
   EmulatedTrigger,
+  emulatedFunctionsByRegion,
   EmulatedTriggerDefinition,
   EmulatedTriggerMap,
-  EmulatedTriggerType,
   findModuleRoot,
   FunctionsRuntimeBundle,
   FunctionsRuntimeFeatures,
   getEmulatedTriggersFromDefinitions,
   FunctionsRuntimeArgs,
   HttpConstants,
+  getSignatureType,
+  SignatureType,
 } from "./functionsEmulatorShared";
-import { Constants } from "./constants";
-import { parseVersionString, compareVersionStrings } from "./functionsEmulatorUtils";
+import { compareVersionStrings } from "./functionsEmulatorUtils";
 import * as express from "express";
 import * as path from "path";
 import * as admin from "firebase-admin";
 import * as bodyParser from "body-parser";
-import * as fs from "fs";
-import { URL } from "url";
+import { pathToFileURL, URL } from "url";
 import * as _ from "lodash";
 
 let triggers: EmulatedTriggerMap | undefined;
 let developerPkgJSON: PackageJSON | undefined;
+
+/**
+ * Dynamically load import function to prevent TypeScript from
+ * transpiling into a require.
+ *
+ * See https://github.com/microsoft/TypeScript/issues/43329.
+ */
+// eslint-disable-next-line @typescript-eslint/no-implied-eval
+const dynamicImport = new Function("modulePath", "return import(modulePath)");
 
 function isFeatureEnabled(
   frb: FunctionsRuntimeBundle,
@@ -36,11 +48,12 @@ function noOp(): false {
   return false;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function requireAsync(moduleName: string, opts?: { paths: string[] }): Promise<any> {
   return new Promise((res, rej) => {
     try {
-      res(require(require.resolve(moduleName, opts)));
-    } catch (e) {
+      res(require(require.resolve(moduleName, opts))); // eslint-disable-line @typescript-eslint/no-var-requires
+    } catch (e: any) {
       rej(e);
     }
   });
@@ -50,7 +63,7 @@ function requireResolveAsync(moduleName: string, opts?: { paths: string[] }): Pr
   return new Promise((res, rej) => {
     try {
       res(require.resolve(moduleName, opts));
-    } catch (e) {
+    } catch (e: any) {
       rej(e);
     }
   });
@@ -58,8 +71,8 @@ function requireResolveAsync(moduleName: string, opts?: { paths: string[] }): Pr
 
 interface PackageJSON {
   engines?: { node?: string };
-  dependencies: { [name: string]: any };
-  devDependencies: { [name: string]: any };
+  dependencies: { [name: string]: any }; // eslint-disable-line @typescript-eslint/no-explicit-any
+  devDependencies: { [name: string]: any }; // eslint-disable-line @typescript-eslint/no-explicit-any
 }
 
 interface ModuleResolution {
@@ -77,7 +90,7 @@ interface SuccessfulModuleResolution {
 }
 
 interface ProxyTarget extends Object {
-  [key: string]: any;
+  [key: string]: any; // eslint-disable-line @typescript-eslint/no-explicit-any
 }
 
 /*
@@ -126,7 +139,7 @@ class Proxied<T extends ProxyTarget> {
 
   proxy: T;
   private anyValue?: (target: T, key: string) => any;
-  private appliedValue?: () => any;
+  private appliedValue?: (...args: any[]) => any;
   private rewrites: {
     [key: string]: (target: T, key: string) => any;
   } = {};
@@ -153,7 +166,7 @@ class Proxied<T extends ProxyTarget> {
       },
       apply: (target, thisArg, argArray) => {
         if (this.appliedValue) {
-          return this.appliedValue.apply(thisArg, argArray);
+          return this.appliedValue.apply(thisArg);
         } else {
           return Proxied.applyOriginal(target, thisArg, argArray);
         }
@@ -189,7 +202,7 @@ class Proxied<T extends ProxyTarget> {
    * Return the final proxied object.
    */
   finalize(): T {
-    return this.proxy as T;
+    return this.proxy;
   }
 }
 
@@ -250,7 +263,7 @@ async function assertResolveDeveloperNodeModule(
 async function verifyDeveloperNodeModules(frb: FunctionsRuntimeBundle): Promise<boolean> {
   const modBundles = [
     { name: "firebase-admin", isDev: false, minVersion: "8.9.0" },
-    { name: "firebase-functions", isDev: false, minVersion: "3.3.0" },
+    { name: "firebase-functions", isDev: false, minVersion: "3.13.1" },
   ];
 
   for (const modBundle of modBundles) {
@@ -294,7 +307,7 @@ function requirePackageJson(frb: FunctionsRuntimeBundle): PackageJSON | undefine
       devDependencies: pkg.devDependencies || {},
     };
     return developerPkgJSON;
-  } catch (err) {
+  } catch (err: any) {
     return;
   }
 }
@@ -340,7 +353,7 @@ function initializeNetworkFiltering(frb: FunctionsRuntimeBundle): void {
             try {
               new URL(arg);
               return arg;
-            } catch (err) {
+            } catch (err: any) {
               return;
             }
           } else if (typeof arg === "object") {
@@ -369,7 +382,7 @@ function initializeNetworkFiltering(frb: FunctionsRuntimeBundle): void {
 
       try {
         return original(...args);
-      } catch (e) {
+      } catch (e: any) {
         const newed = new original(...args); // eslint-disable-line new-cap
         return newed;
       }
@@ -406,7 +419,13 @@ async function initializeFirebaseFunctionsStubs(frb: FunctionsRuntimeBundle): Pr
     firebaseFunctionsResolution.resolution
   );
   const httpsProviderResolution = path.join(firebaseFunctionsRoot, "lib/providers/https");
-  const httpsProvider = require(httpsProviderResolution);
+  const httpsProviderV1Resolution = path.join(firebaseFunctionsRoot, "lib/v1/providers/https");
+  let httpsProvider: any;
+  try {
+    httpsProvider = require(httpsProviderV1Resolution);
+  } catch (e: any) {
+    httpsProvider = require(httpsProviderResolution);
+  }
 
   // TODO: Remove this logic and stop relying on internal APIs.  See #1480 for reasoning.
   const onRequestInnerMethodName = "_onRequestWithOptions";
@@ -431,14 +450,39 @@ async function initializeFirebaseFunctionsStubs(frb: FunctionsRuntimeBundle): Pr
   const onCallInnerMethodName = "_onCallWithOptions";
   const onCallMethodOriginal = httpsProvider[onCallInnerMethodName];
 
-  httpsProvider[onCallInnerMethodName] = (handler: CallableHandler, opts: DeploymentOptions) => {
-    const wrapped = wrapCallableHandler(handler);
-    const cf = onCallMethodOriginal(wrapped, opts);
-    return cf;
-  };
+  // Newer versions of the firebase-functions package's _onCallWithOptions method expects 3 arguments.
+  if (onCallMethodOriginal.length === 3) {
+    httpsProvider[onCallInnerMethodName] = (
+      opts: any,
+      handler: any,
+      deployOpts: DeploymentOptions
+    ) => {
+      const wrapped = wrapCallableHandler(handler);
+      const cf = onCallMethodOriginal(opts, wrapped, deployOpts);
+      return cf;
+    };
+  } else {
+    httpsProvider[onCallInnerMethodName] = (handler: any, opts: DeploymentOptions) => {
+      const wrapped = wrapCallableHandler(handler);
+      const cf = onCallMethodOriginal(wrapped, opts);
+      return cf;
+    };
+  }
 
-  httpsProvider.onCall = (handler: CallableHandler) => {
-    return httpsProvider[onCallInnerMethodName](handler, {});
+  // Newer versions of the firebase-functions package's onCall method can accept upto 2 arguments.
+  httpsProvider.onCall = function (optsOrHandler: any, handler: CallableHandler) {
+    if (onCallMethodOriginal.length === 3) {
+      let opts;
+      if (arguments.length === 1) {
+        opts = {};
+        handler = optsOrHandler as CallableHandler;
+      } else {
+        opts = optsOrHandler;
+      }
+      return httpsProvider[onCallInnerMethodName](opts, handler, {});
+    } else {
+      return httpsProvider[onCallInnerMethodName](optsOrHandler, {});
+    }
   };
 }
 
@@ -477,6 +521,38 @@ function wrapCallableHandler(handler: CallableHandler): CallableHandler {
 
 function getDefaultConfig(): any {
   return JSON.parse(process.env.FIREBASE_CONFIG || "{}");
+}
+
+function initializeRuntimeConfig(frb: FunctionsRuntimeBundle) {
+  // Most recent version of Firebase Functions SDK automatically picks up locally
+  // stored .runtimeconfig.json to populate the config entries.
+  // However, due to a bug in some older version of the Function SDK, this process may fail.
+  //
+  // See the following issues for more detail:
+  //   https://github.com/firebase/firebase-tools/issues/3793
+  //   https://github.com/firebase/firebase-functions/issues/877
+  //
+  // As a workaround, the emulator runtime will load the contents of the .runtimeconfig.json
+  // to the CLOUD_RUNTIME_CONFIG environment variable IF the env var is unused.
+  // In the future, we will bump up the minimum version of the Firebase Functions SDK
+  // required to run the functions emulator to v3.15.1 and get rid of this workaround.
+  if (!process.env.CLOUD_RUNTIME_CONFIG) {
+    const configPath = `${frb.cwd}/.runtimeconfig.json`;
+    try {
+      const configContent = fs.readFileSync(configPath, "utf8");
+      if (configContent) {
+        try {
+          JSON.parse(configContent.toString());
+          logDebug(`Found local functions config: ${configPath}`);
+          process.env.CLOUD_RUNTIME_CONFIG = configContent.toString();
+        } catch (e) {
+          new EmulatorLog("SYSTEM", "function-runtimeconfig-json-invalid", "").log();
+        }
+      }
+    } catch (e) {
+      // Ignore, config is optional
+    }
+  }
 }
 
 /**
@@ -564,6 +640,7 @@ async function initializeFirebaseAdminStubs(frb: FunctionsRuntimeBundle): Promis
   // Stub the admin module in the require cache
   require.cache[adminResolution.resolution] = {
     exports: proxiedAdminModule,
+    path: path.dirname(adminResolution.resolution),
   };
 
   logDebug("firebase-admin has been stubbed.", {
@@ -628,111 +705,6 @@ function warnAboutAuthProd(frb: FunctionsRuntimeBundle): void {
   ).log();
 }
 
-async function initializeEnvironmentalVariables(frb: FunctionsRuntimeBundle): Promise<void> {
-  process.env.TZ = "UTC";
-  process.env.GCLOUD_PROJECT = frb.projectId;
-  process.env.FUNCTIONS_EMULATOR = "true";
-
-  // Look for .runtimeconfig.json in the functions directory
-  const configPath = `${frb.cwd}/.runtimeconfig.json`;
-  try {
-    const configContent = fs.readFileSync(configPath, "utf8");
-    if (configContent) {
-      // try JSON.parse for .runtimeconfig.json and notice if parsing is failed
-      try {
-        JSON.parse(configContent.toString());
-
-        logDebug(`Found local functions config: ${configPath}`);
-        process.env.CLOUD_RUNTIME_CONFIG = configContent.toString();
-      } catch (e) {
-        new EmulatorLog("SYSTEM", "function-runtimeconfig-json-invalid", "").log();
-      }
-    }
-  } catch (e) {
-    // Ignore, config is optional
-  }
-
-  // Before firebase-functions version 3.8.0 the Functions SDK would reject non-prod database URLs.
-  const functionsResolution = await assertResolveDeveloperNodeModule(frb, "firebase-functions");
-  const functionsGt380 = compareVersionStrings(functionsResolution.version, "3.8.0") >= 0;
-  let emulatedDatabaseURL = undefined;
-  if (frb.emulators.database && functionsGt380) {
-    // Database URL will look like one of:
-    //  - https://${namespace}.firebaseio.com
-    //  - https://${namespace}.${location}.firebasedatabase.app
-    let ns = frb.projectId;
-    if (frb.adminSdkConfig.databaseURL) {
-      const asUrl = new URL(frb.adminSdkConfig.databaseURL);
-      ns = asUrl.hostname.split(".")[0];
-    }
-
-    emulatedDatabaseURL = `http://${formatHost(frb.emulators.database)}/?ns=${ns}`;
-  }
-
-  process.env.FIREBASE_CONFIG = JSON.stringify({
-    storageBucket: frb.adminSdkConfig.storageBucket,
-    databaseURL: emulatedDatabaseURL || frb.adminSdkConfig.databaseURL,
-    projectId: frb.projectId,
-  });
-
-  if (frb.triggerId) {
-    // Runtime values are based on information from the bundle. Proper information for this is
-    // available once the target code has been loaded, which is too late.
-    const service = frb.triggerId || "";
-    const target = service.replace(/-/g, ".");
-    const mode = frb.triggerType === EmulatedTriggerType.BACKGROUND ? "event" : "http";
-
-    let nodeVersion = 0;
-    if (frb.nodeMajorVersion) {
-      // If nodeMajorVersion is set, we ignore pkg.engines.node
-      nodeVersion = frb.nodeMajorVersion;
-    } else {
-      const pkg = requirePackageJson(frb);
-      if (pkg?.engines?.node) {
-        const nodeSemVer = parseVersionString(pkg.engines.node);
-        nodeVersion = nodeSemVer.major;
-      }
-    }
-
-    // Setup predefined environment variables for Node.js 10 and subsequent runtimes
-    // https://cloud.google.com/functions/docs/env-var
-    if (nodeVersion >= 10) {
-      setNode10EnvVars(target, mode, service);
-    }
-  }
-
-  // Make firebase-admin point at the Firestore emulator
-  if (frb.emulators.firestore) {
-    process.env[Constants.FIRESTORE_EMULATOR_HOST] = formatHost(frb.emulators.firestore);
-  }
-
-  // Make firebase-admin point at the Database emulator
-  if (frb.emulators.database) {
-    process.env[Constants.FIREBASE_DATABASE_EMULATOR_HOST] = formatHost(frb.emulators.database);
-  }
-
-  // Make firebase-admin point at the Auth emulator
-  if (frb.emulators.auth) {
-    process.env[Constants.FIREBASE_AUTH_EMULATOR_HOST] = formatHost(frb.emulators.auth);
-  }
-
-  if (frb.emulators.pubsub) {
-    const pubsubHost = formatHost(frb.emulators.pubsub);
-    process.env.PUBSUB_EMULATOR_HOST = pubsubHost;
-    logDebug(`Set PUBSUB_EMULATOR_HOST to ${pubsubHost}`);
-  }
-}
-
-// This is a duplicate of the helper we use elsewhere but it's important not to
-// add dependencies to this runtime.
-function formatHost(info: { host: string; port: number }) {
-  if (info.host.includes(":")) {
-    return `[${info.host}]:${info.port}`;
-  } else {
-    return `${info.host}:${info.port}`;
-  }
-}
-
 async function initializeFunctionsConfigHelper(frb: FunctionsRuntimeBundle): Promise<void> {
   const functionsResolution = await assertResolveDeveloperNodeModule(frb, "firebase-functions");
   const localFunctionsModule = require(functionsResolution.resolution);
@@ -765,23 +737,12 @@ async function initializeFunctionsConfigHelper(frb: FunctionsRuntimeBundle): Pro
   // Stub the functions module in the require cache
   require.cache[functionsResolution.resolution] = {
     exports: proxiedFunctionsModule,
+    path: path.dirname(functionsResolution.resolution),
   };
 
   logDebug("firebase-functions has been stubbed.", {
     functionsResolution,
   });
-}
-
-/**
- * Setup predefined environment variables for Node.js 10 and subsequent runtimes
- * https://cloud.google.com/functions/docs/env-var
- */
-function setNode10EnvVars(target: string, mode: "event" | "http", service: string) {
-  process.env.FUNCTION_TARGET = target;
-  process.env.FUNCTION_SIGNATURE_TYPE = mode;
-  process.env.K_SERVICE = service;
-  process.env.K_REVISION = "1";
-  process.env.PORT = "80";
 }
 
 /*
@@ -802,7 +763,7 @@ async function processHTTPS(frb: FunctionsRuntimeBundle, trigger: EmulatedTrigge
     return;
   }
 
-  await new Promise((resolveEphemeralServer, rejectEphemeralServer) => {
+  await new Promise<void>((resolveEphemeralServer, rejectEphemeralServer) => {
     const handler = async (req: express.Request, res: express.Response) => {
       try {
         logDebug(`Ephemeral server handling ${req.method} request`);
@@ -818,7 +779,7 @@ async function processHTTPS(frb: FunctionsRuntimeBundle, trigger: EmulatedTrigge
         });
 
         await runHTTPS([req, res], func);
-      } catch (err) {
+      } catch (err: any) {
         rejectEphemeralServer(err);
       }
     };
@@ -866,10 +827,15 @@ async function processHTTPS(frb: FunctionsRuntimeBundle, trigger: EmulatedTrigge
 
 async function processBackground(
   frb: FunctionsRuntimeBundle,
-  trigger: EmulatedTrigger
+  trigger: EmulatedTrigger,
+  signature: SignatureType
 ): Promise<void> {
   const proto = frb.proto;
   logDebug("ProcessBackground", proto);
+
+  if (signature === "cloudevent") {
+    return runCloudEvent(proto, trigger.getRawFunction());
+  }
 
   // All formats of the payload should carry a "data" property. The "context" property does
   // not exist in all versions. Where it doesn't exist, context is everything besides data.
@@ -879,9 +845,11 @@ async function processBackground(
 
   // This is due to the fact that the Firestore emulator sends payloads in a newer
   // format than production firestore.
-  if (context.resource && context.resource.name) {
-    logDebug("ProcessBackground: lifting resource.name from resource", context.resource);
-    context.resource = context.resource.name;
+  if (!proto.eventType || !proto.eventType.startsWith("google.storage")) {
+    if (context.resource && context.resource.name) {
+      logDebug("ProcessBackground: lifting resource.name from resource", context.resource);
+      context.resource = context.resource.name;
+    }
   }
 
   await runBackground({ data, context }, trigger.getRawFunction());
@@ -894,7 +862,7 @@ async function runFunction(func: () => Promise<any>): Promise<any> {
   let caughtErr;
   try {
     await func();
-  } catch (err) {
+  } catch (err: any) {
     caughtErr = err;
   }
 
@@ -909,6 +877,14 @@ async function runBackground(proto: any, func: CloudFunction<any>): Promise<any>
 
   await runFunction(() => {
     return func(proto.data, proto.context);
+  });
+}
+
+async function runCloudEvent(event: unknown, func: CloudFunction<any>): Promise<any> {
+  logDebug("RunCloudEvent", event);
+
+  await runFunction(() => {
+    return func(event);
   });
 }
 
@@ -973,9 +949,9 @@ async function invokeTrigger(
 
   const trigger = triggers[frb.triggerId];
   logDebug("triggerDefinition", trigger.definition);
-  const mode = trigger.definition.httpsTrigger ? "HTTPS" : "BACKGROUND";
+  const signature = getSignatureType(trigger.definition);
 
-  logDebug(`Running ${frb.triggerId} in mode ${mode}`);
+  logDebug(`Running ${frb.triggerId} in signature ${signature}`);
 
   let seconds = 0;
   const timerId = setInterval(() => {
@@ -997,11 +973,12 @@ async function invokeTrigger(
     }, trigger.timeoutMs);
   }
 
-  switch (mode) {
-    case "BACKGROUND":
-      await processBackground(frb, triggers[frb.triggerId]);
+  switch (signature) {
+    case "event":
+    case "cloudevent":
+      await processBackground(frb, triggers[frb.triggerId], signature);
       break;
-    case "HTTPS":
+    case "http":
       await processHTTPS(frb, triggers[frb.triggerId]);
       break;
   }
@@ -1021,7 +998,7 @@ async function invokeTrigger(
 async function initializeRuntime(
   frb: FunctionsRuntimeBundle,
   serializedFunctionTrigger?: string,
-  extensionTriggers?: EmulatedTriggerDefinition[]
+  extensionTriggers?: ParsedTriggerDefinition[]
 ): Promise<EmulatedTriggerMap | undefined> {
   logDebug(`Disabled runtime features: ${JSON.stringify(frb.disabled_features)}`);
 
@@ -1036,13 +1013,13 @@ async function initializeRuntime(
     return;
   }
 
-  await initializeEnvironmentalVariables(frb);
+  initializeRuntimeConfig(frb);
   initializeNetworkFiltering(frb);
   await initializeFunctionsConfigHelper(frb);
   await initializeFirebaseFunctionsStubs(frb);
   await initializeFirebaseAdminStubs(frb);
 
-  let triggerDefinitions: EmulatedTriggerDefinition[] = [];
+  let parsedDefinitions: ParsedTriggerDefinition[] = [];
   let triggerModule;
 
   if (serializedFunctionTrigger) {
@@ -1051,16 +1028,25 @@ async function initializeRuntime(
   } else {
     try {
       triggerModule = require(frb.cwd);
-    } catch (err) {
-      await moduleResolutionDetective(frb, err);
-      return;
+    } catch (err: any) {
+      if (err.code !== "ERR_REQUIRE_ESM") {
+        await moduleResolutionDetective(frb, err);
+        return;
+      }
+      const modulePath = require.resolve(frb.cwd);
+      // Resolve module path to file:// URL. Required for windows support.
+      const moduleURL = pathToFileURL(modulePath).href;
+      triggerModule = await dynamicImport(moduleURL);
     }
   }
   if (extensionTriggers) {
-    triggerDefinitions = extensionTriggers;
+    parsedDefinitions = extensionTriggers;
   } else {
-    require("../extractTriggers")(triggerModule, triggerDefinitions);
+    require("../deploy/functions/runtimes/node/extractTriggers")(triggerModule, parsedDefinitions);
   }
+
+  const triggerDefinitions: EmulatedTriggerDefinition[] =
+    emulatedFunctionsByRegion(parsedDefinitions);
 
   const triggers = getEmulatedTriggersFromDefinitions(triggerDefinitions, triggerModule);
 
@@ -1082,7 +1068,7 @@ async function handleMessage(message: string) {
   let runtimeArgs: FunctionsRuntimeArgs;
   try {
     runtimeArgs = JSON.parse(message) as FunctionsRuntimeArgs;
-  } catch (e) {
+  } catch (e: any) {
     new EmulatorLog("FATAL", "runtime-error", `Got unexpected message body: ${message}`).log();
     await flushAndExit(1);
     return;
@@ -1127,7 +1113,7 @@ async function handleMessage(message: string) {
     } else {
       await goIdle();
     }
-  } catch (err) {
+  } catch (err: any) {
     new EmulatorLog("FATAL", "runtime-error", err.stack ? err.stack : err).log();
     await flushAndExit(1);
   }

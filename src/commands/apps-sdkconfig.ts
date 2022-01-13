@@ -11,7 +11,7 @@ import {
   getAppPlatform,
   listFirebaseApps,
 } from "../management/apps";
-import * as getProjectId from "../getProjectId";
+import { needProjectId } from "../projectUtils";
 import { getOrPromptProject } from "../management/projects";
 import { FirebaseError } from "../error";
 import { requireAuth } from "../requireAuth";
@@ -41,7 +41,6 @@ async function selectAppInteractively(
 
   return await promptOnce({
     type: "list",
-    name: "id",
     message:
       `Select the ${appPlatform === AppPlatform.ANY ? "" : appPlatform + " "}` +
       "app to get the configuration data:",
@@ -62,7 +61,7 @@ module.exports = new Command("apps:sdkconfig [platform] [appId]")
       let appPlatform = getAppPlatform(platform);
 
       if (!appId) {
-        let projectId = getProjectId(options);
+        let projectId = needProjectId(options);
         if (options.nonInteractive && !projectId) {
           throw new FirebaseError("Must supply app and project ids in non-interactive mode.");
         } else if (!projectId) {
@@ -92,7 +91,7 @@ module.exports = new Command("apps:sdkconfig [platform] [appId]")
       ).start();
       try {
         configData = await getAppConfig(appId, appPlatform);
-      } catch (err) {
+      } catch (err: any) {
         spinner.fail();
         throw err;
       }

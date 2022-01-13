@@ -3,7 +3,7 @@ import * as marked from "marked";
 
 import { Command } from "../command";
 import { registerPublisherProfile } from "../extensions/extensionsApi";
-import * as getProjectId from "../getProjectId";
+import { needProjectId } from "../projectUtils";
 import { promptOnce } from "../prompt";
 import { ensureExtensionsApiEnabled, logPrefix } from "../extensions/extensionsHelper";
 import { promptForPublisherTOS } from "../extensions/askUserForConsent";
@@ -21,11 +21,11 @@ export default new Command("ext:dev:register")
   .before(ensureExtensionsApiEnabled)
   .action(async (options: any) => {
     await promptForPublisherTOS();
-    const projectId = getProjectId(options, false);
+    const projectId = needProjectId(options);
     const msg =
       "What would you like to register as your publisher ID? " +
       "This value identifies you in Firebase's registry of extensions as the author of your extensions. " +
-      "Examples: my-company-name, MyGitHubUsername. If you are a member of the Extensions EAP group, your published extensions will only be accessible to other members of the EAP group. \n\n" +
+      "Examples: my-company-name, MyGitHubUsername.\n\n" +
       "You can only do this once for each project.";
     const publisherId = await promptOnce({
       name: "publisherId",
@@ -35,7 +35,7 @@ export default new Command("ext:dev:register")
     });
     try {
       await registerPublisherProfile(projectId, publisherId);
-    } catch (err) {
+    } catch (err: any) {
       if (err.status === 409) {
         const error =
           `Couldn't register the publisher ID '${clc.bold(publisherId)}' to the project '${clc.bold(
@@ -52,8 +52,7 @@ export default new Command("ext:dev:register")
       throw new FirebaseError(
         `Failed to register publisher ID ${clc.bold(publisherId)} for project ${clc.bold(
           projectId
-        )}: ${err.message}`,
-        { exit: 1 }
+        )}: ${err.message}`
       );
     }
     return utils.logLabeledSuccess(

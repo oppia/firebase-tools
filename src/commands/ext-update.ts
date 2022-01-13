@@ -3,43 +3,55 @@ import * as _ from "lodash";
 import * as marked from "marked";
 import * as ora from "ora";
 import TerminalRenderer = require("marked-terminal");
-import * as semver from "semver";
 
 import { checkMinRequiredVersion } from "../checkMinRequiredVersion";
 import { Command } from "../command";
 import { FirebaseError } from "../error";
 import { displayNode10UpdateBillingNotice } from "../extensions/billingMigrationHelper";
-import { isBillingEnabled, enableBilling } from "../extensions/checkProjectBilling";
+import { enableBilling } from "../extensions/checkProjectBilling";
+import { checkBillingEnabled } from "../gcp/cloudbilling";
 import * as extensionsApi from "../extensions/extensionsApi";
+import * as secretsUtils from "../extensions/secretsUtils";
+import * as provisioningHelper from "../extensions/provisioningHelper";
 import {
   ensureExtensionsApiEnabled,
   logPrefix,
   getSourceOrigin,
   SourceOrigin,
+  confirm,
 } from "../extensions/extensionsHelper";
 import * as paramHelper from "../extensions/paramHelper";
 import {
   displayChanges,
   update,
   UpdateOptions,
-  retryUpdate,
   updateFromLocalSource,
   updateFromUrlSource,
-  updateFromRegistry,
-  updateToVersionFromRegistry,
   updateToVersionFromPublisherSource,
   updateFromPublisherSource,
   getExistingSourceOrigin,
+  inferUpdateSource,
 } from "../extensions/updateHelper";
-import * as getProjectId from "../getProjectId";
+import * as refs from "../extensions/refs";
+import { needProjectId } from "../projectUtils";
 import { requirePermissions } from "../requirePermissions";
 import * as utils from "../utils";
 import { previews } from "../previews";
-import { displayExtInfo } from "../extensions/displayExtensionInfo";
 
 marked.setOptions({
   renderer: new TerminalRenderer(),
 });
+
+function isValidUpdate(existingSourceOrigin: SourceOrigin, newSourceOrigin: SourceOrigin): boolean {
+  if (existingSourceOrigin === SourceOrigin.PUBLISHED_EXTENSION) {
+    return [SourceOrigin.PUBLISHED_EXTENSION, SourceOrigin.PUBLISHED_EXTENSION_VERSION].includes(
+      newSourceOrigin
+    );
+  } else if (existingSourceOrigin === SourceOrigin.LOCAL) {
+    return [SourceOrigin.LOCAL, SourceOrigin.URL].includes(newSourceOrigin);
+  }
+  return false;
+}
 
 /**
  * Command for updating an existing extension instance
@@ -56,16 +68,16 @@ export default new Command("ext:update <extensionInstanceId> [updateSource]")
   ])
   .before(ensureExtensionsApiEnabled)
   .before(checkMinRequiredVersion, "extMinVersion")
+  .withForce()
+  .option("--params <paramsFile>", "name of params variables file with .env format.")
   .action(async (instanceId: string, updateSource: string, options: any) => {
-    const spinner = ora.default(
-      `Updating ${clc.bold(instanceId)}. This usually takes 3 to 5 minutes...`
-    );
+    const spinner = ora(`Updating ${clc.bold(instanceId)}. This usually takes 3 to 5 minutes...`);
     try {
-      const projectId = getProjectId(options, false);
-      let existingInstance;
+      const projectId = needProjectId(options);
+      let existingInstance: extensionsApi.ExtensionInstance;
       try {
         existingInstance = await extensionsApi.getInstance(projectId, instanceId);
-      } catch (err) {
+      } catch (err: any) {
         if (err.status === 404) {
           throw new FirebaseError(
             `Extension instance '${clc.bold(instanceId)}' not found in project '${clc.bold(
@@ -75,10 +87,7 @@ export default new Command("ext:update <extensionInstanceId> [updateSource]")
         }
         throw err;
       }
-      const existingSpec: extensionsApi.ExtensionSpec = _.get(
-        existingInstance,
-        "config.source.spec"
-      );
+      const existingSpec: extensionsApi.ExtensionSpec = existingInstance.config.source.spec;
       if (existingInstance.config.source.state === "DELETED") {
         throw new FirebaseError(
           `Instance '${clc.bold(
@@ -86,73 +95,28 @@ export default new Command("ext:update <extensionInstanceId> [updateSource]")
           )}' cannot be updated anymore because the underlying extension was unpublished from Firebase's registry of extensions. Going forward, you will only be able to re-configure or uninstall this instance.`
         );
       }
-      const existingParams = _.get(existingInstance, "config.params");
-      const existingSource = _.get(existingInstance, "config.source.name");
+      const existingParams = existingInstance.config.params;
+      const existingSource = existingInstance.config.source.name;
 
-      // Infer updateSource if instance is from the registry
-      if (existingInstance.config.extensionRef && !updateSource) {
-        updateSource = `${existingInstance.config.extensionRef}@latest`;
-      } else if (existingInstance.config.extensionRef && semver.valid(updateSource)) {
-        updateSource = `${existingInstance.config.extensionRef}@${updateSource}`;
+      if (existingInstance.config.extensionRef) {
+        // User may provide abbreviated syntax in the update command (for example, providing no update source or just a semver)
+        // Decipher the explicit update source from the abbreviated syntax.
+        updateSource = inferUpdateSource(updateSource, existingInstance.config.extensionRef);
       }
-
       let newSourceName: string;
-      let published = false;
-
       const existingSourceOrigin = await getExistingSourceOrigin(
         projectId,
         instanceId,
         existingSpec.name,
         existingSource
       );
-      const newSourceOrigin = await getSourceOrigin(updateSource);
-
-      // We only allow the following types of updates.
-      let validUpdate = false;
-      if (existingSourceOrigin === SourceOrigin.OFFICIAL_EXTENSION) {
-        if (
-          [
-            SourceOrigin.LOCAL,
-            SourceOrigin.URL,
-            SourceOrigin.OFFICIAL_EXTENSION,
-            SourceOrigin.OFFICIAL_EXTENSION_VERSION,
-          ].includes(newSourceOrigin)
-        ) {
-          validUpdate = true;
-        }
-      } else if (existingSourceOrigin === SourceOrigin.PUBLISHED_EXTENSION) {
-        if (
-          [
-            SourceOrigin.LOCAL,
-            SourceOrigin.URL,
-            SourceOrigin.PUBLISHED_EXTENSION,
-            SourceOrigin.PUBLISHED_EXTENSION_VERSION,
-          ].includes(newSourceOrigin)
-        ) {
-          validUpdate = true;
-        }
-      } else if (
-        existingSourceOrigin === SourceOrigin.LOCAL ||
-        existingSourceOrigin === SourceOrigin.URL
-      ) {
-        if ([SourceOrigin.LOCAL, SourceOrigin.URL].includes(newSourceOrigin)) {
-          validUpdate = true;
-        }
-      }
+      const newSourceOrigin = getSourceOrigin(updateSource);
+      const validUpdate = isValidUpdate(existingSourceOrigin, newSourceOrigin);
       if (!validUpdate) {
         throw new FirebaseError(
           `Cannot update from a(n) ${existingSourceOrigin} to a(n) ${newSourceOrigin}. Please provide a new source that is a(n) ${existingSourceOrigin} and try again.`
         );
       }
-
-      const isPublished = [
-        SourceOrigin.OFFICIAL_EXTENSION,
-        SourceOrigin.OFFICIAL_EXTENSION_VERSION,
-        SourceOrigin.PUBLISHED_EXTENSION,
-        SourceOrigin.PUBLISHED_EXTENSION_VERSION,
-      ].includes(newSourceOrigin);
-      displayExtInfo(instanceId, existingSpec, isPublished);
-
       // TODO: remove "falls through" once producer and registry experience are released
       switch (newSourceOrigin) {
         case SourceOrigin.LOCAL:
@@ -161,8 +125,7 @@ export default new Command("ext:update <extensionInstanceId> [updateSource]")
               projectId,
               instanceId,
               updateSource,
-              existingSpec,
-              existingSource
+              existingSpec
             );
             break;
           }
@@ -174,56 +137,38 @@ export default new Command("ext:update <extensionInstanceId> [updateSource]")
               projectId,
               instanceId,
               updateSource,
-              existingSpec,
-              existingSource
+              existingSpec
             );
             break;
           }
-        case SourceOrigin.OFFICIAL_EXTENSION_VERSION:
-          newSourceName = await updateToVersionFromRegistry(
-            projectId,
-            instanceId,
-            existingSpec,
-            existingSource,
-            updateSource
-          );
-          break;
-        case SourceOrigin.OFFICIAL_EXTENSION:
-          newSourceName = await updateFromRegistry(
-            projectId,
-            instanceId,
-            existingSpec,
-            existingSource
-          );
-          break;
-        // falls through
         case SourceOrigin.PUBLISHED_EXTENSION_VERSION:
-          if (previews.extdev) {
-            newSourceName = await updateToVersionFromPublisherSource(
-              projectId,
-              instanceId,
-              updateSource,
-              existingSpec,
-              existingSource
-            );
-            published = true;
-            break;
-          }
-        // falls through
+          newSourceName = await updateToVersionFromPublisherSource(
+            projectId,
+            instanceId,
+            updateSource,
+            existingSpec
+          );
+          break;
         case SourceOrigin.PUBLISHED_EXTENSION:
-          if (previews.extdev) {
-            newSourceName = await updateFromPublisherSource(
-              projectId,
-              instanceId,
-              updateSource,
-              existingSpec,
-              existingSource
-            );
-            published = true;
-            break;
-          }
+          newSourceName = await updateFromPublisherSource(
+            projectId,
+            instanceId,
+            updateSource,
+            existingSpec
+          );
+          break;
         default:
           throw new FirebaseError(`Unknown source '${clc.bold(updateSource)}.'`);
+      }
+
+      if (
+        !(await confirm({
+          nonInteractive: options.nonInteractive,
+          force: options.force,
+          default: true,
+        }))
+      ) {
+        throw new FirebaseError(`Update cancelled.`);
       }
 
       // TODO(fix): currently exploiting an oversight in this method call to make calls to both
@@ -244,43 +189,78 @@ export default new Command("ext:update <extensionInstanceId> [updateSource]")
             existingSpec.version
           )}.`
         );
-        const retry = await retryUpdate();
+        const retry = await confirm({
+          nonInteractive: options.nonInteractive,
+          force: options.force,
+          default: false,
+        });
         if (!retry) {
           utils.logLabeledBullet(logPrefix, "Update aborted.");
           return;
         }
       }
-      await displayChanges(existingSpec, newSpec, published);
-      if (newSpec.billingRequired) {
-        const enabled = await isBillingEnabled(projectId);
+
+      await displayChanges({
+        spec: existingSpec,
+        newSpec: newSpec,
+        nonInteractive: options.nonInteractive,
+        force: options.force,
+      });
+
+      await provisioningHelper.checkProductsProvisioned(projectId, newSpec);
+
+      const usesSecrets = secretsUtils.usesSecrets(newSpec);
+      if (newSpec.billingRequired || usesSecrets) {
+        const enabled = await checkBillingEnabled(projectId);
+        displayNode10UpdateBillingNotice(existingSpec, newSpec);
+        if (
+          !(await confirm({
+            nonInteractive: options.nonInteractive,
+            force: options.force,
+            default: true,
+          }))
+        ) {
+          throw new FirebaseError("Update cancelled.");
+        }
         if (!enabled) {
-          await displayNode10UpdateBillingNotice(existingSpec, newSpec, false);
-          await enableBilling(projectId, instanceId);
-        } else {
-          await displayNode10UpdateBillingNotice(existingSpec, newSpec, true);
+          if (!options.nonInteractive) {
+            await enableBilling(projectId);
+          } else {
+            throw new FirebaseError(
+              "The extension requires your project to be upgraded to the Blaze plan. " +
+                "To run this command in non-interactive mode, first upgrade your project: " +
+                marked(
+                  `https://console.cloud.google.com/billing/linkedaccount?project=${projectId}`
+                )
+            );
+          }
+        }
+        if (usesSecrets) {
+          await secretsUtils.ensureSecretManagerApiEnabled(options);
         }
       }
-      const newParams = await paramHelper.promptForNewParams(
-        existingSpec,
+      // make a copy of existingParams -- they get overridden by paramHelper.getParamsForUpdate
+      const oldParamValues = { ...existingParams };
+      const newParams = await paramHelper.getParamsForUpdate({
+        spec: existingSpec,
         newSpec,
-        existingParams,
-        projectId
-      );
+        currentParams: existingParams,
+        projectId,
+        paramsEnvPath: options.params,
+        nonInteractive: options.nonInteractive,
+        instanceId,
+      });
       spinner.start();
       const updateOptions: UpdateOptions = {
         projectId,
         instanceId,
-        source: newSource,
       };
       if (newSourceName.includes("publisher")) {
-        const { publisherId, extensionId, version } = extensionsApi.parseExtensionVersionName(
-          newSourceName
-        );
-        updateOptions.extRef = `${publisherId}/${extensionId}@${version}`;
+        updateOptions.extRef = refs.toExtensionVersionRef(refs.parse(newSourceName));
       } else {
         updateOptions.source = newSource;
       }
-      if (!_.isEqual(newParams, existingParams)) {
+      if (!_.isEqual(newParams, oldParamValues)) {
         updateOptions.params = newParams;
       }
       await update(updateOptions);
@@ -295,7 +275,7 @@ export default new Command("ext:update <extensionInstanceId> [updateSource]")
           )}`
         )
       );
-    } catch (err) {
+    } catch (err: any) {
       if (spinner.isSpinning) {
         spinner.fail();
       }

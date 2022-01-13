@@ -22,7 +22,7 @@ const validFunctionTypes = [
 function wrappedSafeLoad(source: string): any {
   try {
     return yaml.safeLoad(source);
-  } catch (err) {
+  } catch (err: any) {
     if (err instanceof yaml.YAMLException) {
       throw new FirebaseError(`YAML Error: ${err.message}`, { original: err });
     }
@@ -77,7 +77,7 @@ export function getFunctionResourcesWithParamSubstitution(
   const rawResources = extensionSpec.resources.filter((resource) =>
     validFunctionTypes.includes(resource.type)
   );
-  return substituteParams(rawResources, params);
+  return substituteParams<Resource[]>(rawResources, params);
 }
 
 export function getFunctionProperties(resources: Resource[]) {

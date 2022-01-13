@@ -7,7 +7,7 @@ import { FirebaseError } from "../error";
 import { logLabeledSuccess, datetimeString, logLabeledWarning, consoleUrl } from "../utils";
 import { promptOnce } from "../prompt";
 import { requirePermissions } from "../requirePermissions";
-import * as getProjectId from "../getProjectId";
+import { needProjectId } from "../projectUtils";
 import { logger } from "../logger";
 import * as requireConfig from "../requireConfig";
 import * as marked from "marked";
@@ -30,7 +30,7 @@ export default new Command("hosting:channel:create [channelId]")
       channelId: string,
       options: any // eslint-disable-line @typescript-eslint/no-explicit-any
     ): Promise<Channel> => {
-      const projectId = getProjectId(options);
+      const projectId = needProjectId(options);
       const site = options.site;
 
       let expireTTL = DEFAULT_DURATION;
@@ -38,30 +38,23 @@ export default new Command("hosting:channel:create [channelId]")
         expireTTL = calculateChannelExpireTTL(options.expires);
       }
 
-      if (!channelId) {
-        if (options.nonInteractive) {
-          throw new FirebaseError(
-            `"channelId" argument must be provided in a non-interactive environment`
-          );
-        }
-        channelId = await promptOnce(
-          {
-            type: "input",
-            message: "Please provide a URL-friendly name for the channel:",
-            validate: (s) => s.length > 0,
-          } // Prevents an empty string from being submitted!
-        );
+      if (channelId) {
+        options.channelId = channelId;
       }
-      if (!channelId) {
-        throw new FirebaseError(`"channelId" must not be empty`);
-      }
+      channelId =
+        channelId ||
+        (await promptOnce({
+          type: "input",
+          message: "Please provide a URL-friendly name for the channel:",
+          validate: (s) => s.length > 0,
+        }));
 
       channelId = normalizeName(channelId);
 
       let channel: Channel;
       try {
         channel = await createChannel(projectId, site, channelId, expireTTL);
-      } catch (e) {
+      } catch (e: any) {
         if (e.status === 409) {
           throw new FirebaseError(
             `Channel ${bold(channelId)} already exists on site ${bold(site)}. Deploy to ${bold(
@@ -75,7 +68,7 @@ export default new Command("hosting:channel:create [channelId]")
 
       try {
         await addAuthDomains(projectId, [channel.url]);
-      } catch (e) {
+      } catch (e: any) {
         logLabeledWarning(
           LOG_TAG,
           marked(

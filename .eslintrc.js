@@ -10,7 +10,6 @@ module.exports = {
     "plugin:jsdoc/recommended",
     "google",
     "prettier",
-    "prettier/@typescript-eslint",
   ],
   rules: {
     "jsdoc/newline-after-description": "off",
@@ -32,6 +31,11 @@ module.exports = {
       rules: {
         "jsdoc/require-param-type": "off",
         "jsdoc/require-returns-type": "off",
+
+        // Google style guide allows us to omit trivial parameters and returns
+        "jsdoc/require-param": "off",
+        "jsdoc/require-returns": "off",
+
         "no-invalid-this": "off", // Turned off in favor of @typescript-eslint/no-invalid-this.
         "@typescript-eslint/no-invalid-this": ["error"],
 
@@ -42,6 +46,7 @@ module.exports = {
         "@typescript-eslint/no-inferrable-types": "warn", // TODO(bkendall): remove, allow to error.
         "@typescript-eslint/no-misused-promises": "warn", // TODO(bkendall): remove, allow to error.
         "@typescript-eslint/no-unnecessary-type-assertion": "warn", // TODO(bkendall): remove, allow to error.
+        "@typescript-eslint/no-unsafe-argument": "warn", // TODO(bkendall): remove, allow to error.
         "@typescript-eslint/no-unsafe-assignment": "warn", // TODO(bkendall): remove, allow to error.
         "@typescript-eslint/no-unsafe-call": "warn", // TODO(bkendall): remove, allow to error.
         "@typescript-eslint/no-unsafe-member-access": "warn", // TODO(bkendall): remove, allow to error.
@@ -68,6 +73,7 @@ module.exports = {
         "@typescript-eslint/no-floating-promises": "off",
         "@typescript-eslint/no-misused-promises": "off",
         "@typescript-eslint/no-this-alias": "off",
+        "@typescript-eslint/no-unsafe-argument": "off",
         "@typescript-eslint/no-unsafe-assignment": "off",
         "@typescript-eslint/no-unsafe-call": "off",
         "@typescript-eslint/no-unsafe-member-access": "off",

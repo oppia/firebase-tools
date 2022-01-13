@@ -4,15 +4,16 @@ import * as os from "os";
 import * as path from "path";
 import * as express from "express";
 import * as fs from "fs";
+
+import { Constants } from "./constants";
 import { InvokeRuntimeOpts } from "./functionsEmulator";
+import { FunctionsPlatform } from "../deploy/functions/backend";
 
-export enum EmulatedTriggerType {
-  BACKGROUND = "BACKGROUND",
-  HTTPS = "HTTPS",
-}
+export type SignatureType = "http" | "event" | "cloudevent";
 
-export interface EmulatedTriggerDefinition {
+export interface ParsedTriggerDefinition {
   entryPoint: string;
+  platform: FunctionsPlatform;
   name: string;
   timeout?: string | number; // Can be "3s" for some reason lol
   regions?: string[];
@@ -23,6 +24,11 @@ export interface EmulatedTriggerDefinition {
   labels?: { [key: string]: any };
 }
 
+export interface EmulatedTriggerDefinition extends ParsedTriggerDefinition {
+  id: string; // An unique-id per-function, generated from the name and the region.
+  region: string;
+}
+
 export interface EventSchedule {
   schedule: string;
   timeZone?: string;
@@ -30,8 +36,9 @@ export interface EventSchedule {
 
 export interface EventTrigger {
   resource: string;
-  service: string;
   eventType: string;
+  // Deprecated
+  service?: string;
 }
 
 export interface EmulatedTriggerMap {
@@ -47,7 +54,7 @@ export interface FunctionsRuntimeBundle {
   projectId: string;
   proto?: any;
   triggerId?: string;
-  triggerType?: EmulatedTriggerType;
+  targetName?: string;
   emulators: {
     firestore?: {
       host: string;
@@ -62,6 +69,10 @@ export interface FunctionsRuntimeBundle {
       port: number;
     };
     auth?: {
+      host: string;
+      port: number;
+    };
+    storage?: {
       host: string;
       port: number;
     };
@@ -124,14 +135,52 @@ export class EmulatedTrigger {
   }
 }
 
+/**
+ * Creates a unique trigger definition for each region a function is defined in.
+ * @param definitions A list of all CloudFunctions in the deployment.
+ * @return A list of all CloudFunctions in the deployment, with copies for each region.
+ */
+export function emulatedFunctionsByRegion(
+  definitions: ParsedTriggerDefinition[]
+): EmulatedTriggerDefinition[] {
+  const regionDefinitions: EmulatedTriggerDefinition[] = [];
+  for (const def of definitions) {
+    if (!def.regions) {
+      def.regions = ["us-central1"];
+    }
+    // Create a separate CloudFunction for
+    // each region we deploy a function to
+    for (const region of def.regions) {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+      const defDeepCopy: EmulatedTriggerDefinition = JSON.parse(JSON.stringify(def));
+      defDeepCopy.regions = [region];
+      defDeepCopy.region = region;
+      defDeepCopy.id = `${region}-${defDeepCopy.name}`;
+      defDeepCopy.platform = defDeepCopy.platform || "gcfv1";
+
+      regionDefinitions.push(defDeepCopy);
+    }
+  }
+  return regionDefinitions;
+}
+
+/**
+ * Converts an array of EmulatedTriggerDefinitions to a map of EmulatedTriggers, which contain information on execution,
+ * @param {EmulatedTriggerDefinition[]} definitions An array of regionalized, parsed trigger definitions
+ * @param {Object} module Actual module which contains multiple functions / definitions
+ * @return a map of trigger ids to EmulatedTriggers
+ */
 export function getEmulatedTriggersFromDefinitions(
   definitions: EmulatedTriggerDefinition[],
-  module: any
+  module: any // eslint-disable-line @typescript-eslint/explicit-module-boundary-types, @typescript-eslint/no-explicit-any
 ): EmulatedTriggerMap {
-  return definitions.reduce((obj: { [triggerName: string]: any }, definition: any) => {
-    obj[definition.name] = new EmulatedTrigger(definition, module);
-    return obj;
-  }, {});
+  return definitions.reduce(
+    (obj: { [triggerName: string]: EmulatedTrigger }, definition: EmulatedTriggerDefinition) => {
+      obj[definition.id] = new EmulatedTrigger(definition, module);
+      return obj;
+    },
+    {}
+  );
 }
 
 export function getTemporarySocketPath(pid: number, cwd: string): string {
@@ -155,20 +204,45 @@ export function getTemporarySocketPath(pid: number, cwd: string): string {
   }
 }
 
-export function getFunctionRegion(def: EmulatedTriggerDefinition): string {
-  if (def.regions && def.regions.length > 0) {
-    return def.regions[0];
-  }
-
-  return "us-central1";
-}
-
 export function getFunctionService(def: EmulatedTriggerDefinition): string {
   if (def.eventTrigger) {
-    return def.eventTrigger.service;
+    return def.eventTrigger.service ?? getServiceFromEventType(def.eventTrigger.eventType);
   }
 
   return "unknown";
+}
+
+export function getServiceFromEventType(eventType: string): string {
+  if (eventType.includes("firestore")) {
+    return Constants.SERVICE_FIRESTORE;
+  }
+  if (eventType.includes("database")) {
+    return Constants.SERVICE_REALTIME_DATABASE;
+  }
+  if (eventType.includes("pubsub")) {
+    return Constants.SERVICE_PUBSUB;
+  }
+  if (eventType.includes("storage")) {
+    return Constants.SERVICE_STORAGE;
+  }
+  // Below this point are services that do not have a emulator.
+  if (eventType.includes("analytics")) {
+    return Constants.SERVICE_ANALYTICS;
+  }
+  if (eventType.includes("auth")) {
+    return Constants.SERVICE_AUTH;
+  }
+  if (eventType.includes("crashlytics")) {
+    return Constants.SERVICE_CRASHLYTICS;
+  }
+  if (eventType.includes("remoteconfig")) {
+    return Constants.SERVICE_REMOTE_CONFIG;
+  }
+  if (eventType.includes("testing")) {
+    return Constants.SERVICE_TEST_LAB;
+  }
+
+  return "";
 }
 
 export function waitForBody(req: express.Request): Promise<string> {
@@ -201,10 +275,28 @@ export function findModuleRoot(moduleName: string, filepath: string): string {
         return chunks.join("/");
       }
       break;
-    } catch (err) {
+    } catch (err: any) {
       /**/
     }
   }
 
   return "";
+}
+
+export function formatHost(info: { host: string; port: number }): string {
+  if (info.host.includes(":")) {
+    return `[${info.host}]:${info.port}`;
+  } else {
+    return `${info.host}:${info.port}`;
+  }
+}
+
+export function getSignatureType(def: EmulatedTriggerDefinition): SignatureType {
+  if (def.httpsTrigger) {
+    return "http";
+  }
+  // TODO: As implemented, emulated CF3v1 functions cannot receive events in CloudEvent format, and emulated CF3v2
+  // functions cannot receive events in legacy format. This conflicts with our goal of introducing a 'compat' layer
+  // that allows CF3v1 functions to target GCFv2 and vice versa.
+  return def.platform === "gcfv2" ? "cloudevent" : "event";
 }

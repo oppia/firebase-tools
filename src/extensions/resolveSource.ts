@@ -8,30 +8,13 @@ import { logger } from "../logger";
 import { promptOnce } from "../prompt";
 
 const EXTENSIONS_REGISTRY_ENDPOINT = "/extensions.json";
-const AUDIENCE_WARNING_MESSAGES: { [key: string]: string } = {
-  "open-alpha": marked(
-    `${clc.bold("Important")}: This extension is part of the ${clc.bold(
-      "preliminary-release program"
-    )} for extensions.\n Its functionality might change in backward-incompatible ways before its official release. Learn more: https://github.com/firebase/extensions/tree/master/.preliminary-release-extensions`
-  ),
-  "closed-alpha": marked(
-    `${clc.yellow.bold("Important")}: This extension is part of the ${clc.bold(
-      "Firebase Alpha program"
-    )}.\n This extension is strictly confidential, and its functionality might change in backward-incompatible ways before its official, public release. Learn more: https://dev-partners.googlesource.com/samples/firebase/extensions-alpha/+/refs/heads/master/README.md`
-  ),
-  experimental: marked(
-    `${clc.yellow.bold("Important")}: This extension is ${clc.bold(
-      "experimental"
-    )} and may not be production-ready. Its functionality might change in backward-incompatible ways before its official release, or it may be discontinued. Learn more: https://github.com/FirebaseExtended/experimental-extensions`
-  ),
-};
 
 export interface RegistryEntry {
   icons?: { [key: string]: string };
   labels: { [key: string]: string };
   versions: { [key: string]: string };
   updateWarnings?: { [key: string]: UpdateWarning[] };
-  audience?: string;
+  publisher: string;
 }
 
 export interface UpdateWarning {
@@ -122,51 +105,6 @@ export function getMinRequiredVersion(registryEntry: RegistryEntry): string {
 }
 
 /**
- * Checks for and prompts the user to accept updateWarnings that apply to the given start and end versions.
- * @param registryEntry the registry entry to check for updateWarnings.
- * @param startVersion the version that you are updating from.
- * @param endVersion the version you are updating to.
- * @throws FirebaseError if the user doesn't accept the update warning prompt.
- */
-export async function promptForUpdateWarnings(
-  registryEntry: RegistryEntry,
-  startVersion: string,
-  endVersion: string
-): Promise<void> {
-  if (registryEntry.updateWarnings) {
-    for (const targetRange in registryEntry.updateWarnings) {
-      if (semver.satisfies(endVersion, targetRange)) {
-        const updateWarnings = registryEntry.updateWarnings[targetRange];
-        for (const updateWarning of updateWarnings) {
-          if (semver.satisfies(startVersion, updateWarning.from)) {
-            await module.exports.confirmUpdateWarning(updateWarning);
-            break;
-          }
-        }
-        break;
-      }
-    }
-  }
-}
-
-/**
- * Checks the audience field of a RegistryEntry, displays a warning text
- * for closed and open alpha extensions, and prompts the user to accept.
- */
-export async function promptForAudienceConsent(registryEntry: RegistryEntry): Promise<boolean> {
-  let consent = true;
-  if (registryEntry.audience && AUDIENCE_WARNING_MESSAGES[registryEntry.audience]) {
-    logger.info(AUDIENCE_WARNING_MESSAGES[registryEntry.audience]);
-    consent = await promptOnce({
-      type: "confirm",
-      message: "Do you acknowledge the status of this extension?",
-      default: true,
-    });
-  }
-  return consent;
-}
-
-/**
  * Fetches the published extensions registry.
  * @param onlyFeatured If true, only return the featured extensions.
  */
@@ -185,4 +123,26 @@ export async function getExtensionRegistry(
     });
   }
   return extensions;
+}
+
+/**
+ * Fetches a list all publishers that appear in the v1 registry.
+ */
+export async function getTrustedPublishers(): Promise<string[]> {
+  let registry: { [key: string]: RegistryEntry };
+  try {
+    registry = await getExtensionRegistry();
+  } catch (err: any) {
+    logger.debug(
+      "Couldn't get extensions registry, assuming no trusted publishers except Firebase."
+    );
+    return ["firebase"];
+  }
+  const publisherIds = new Set<string>();
+
+  // eslint-disable-next-line guard-for-in
+  for (const entry in registry) {
+    publisherIds.add(registry[entry].publisher);
+  }
+  return Array.from(publisherIds);
 }

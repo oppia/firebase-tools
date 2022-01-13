@@ -1,14 +1,20 @@
 import { expect } from "chai";
 import { decode as decodeJwt, JwtHeader } from "jsonwebtoken";
 import { FirebaseJwtPayload } from "../../../emulator/auth/operations";
-import { TEST_PHONE_NUMBER } from "./helpers";
-import { describeAuthEmulator } from "./setup";
+import { describeAuthEmulator, PROJECT_ID } from "./setup";
 import {
   expectStatusCode,
   registerAnonUser,
   signInWithPhoneNumber,
   updateAccountByLocalId,
   inspectVerificationCodes,
+  registerUser,
+  TEST_MFA_INFO,
+  TEST_PHONE_NUMBER,
+  TEST_PHONE_NUMBER_2,
+  enrollPhoneMfa,
+  updateProjectConfig,
+  registerTenant,
 } from "./helpers";
 
 describeAuthEmulator("phone auth sign-in", ({ authApi }) => {
@@ -67,6 +73,48 @@ describeAuthEmulator("phone auth sign-in", ({ authApi }) => {
         expect(res.body.error)
           .to.have.property("message")
           .equals("INVALID_PHONE_NUMBER : Invalid format.");
+      });
+  });
+
+  it("should error on sendVerificationMode if usageMode is passthrough", async () => {
+    const phoneNumber = TEST_PHONE_NUMBER;
+    await updateProjectConfig(authApi(), { usageMode: "PASSTHROUGH" });
+
+    const sessionInfo = await authApi()
+      .post("/identitytoolkit.googleapis.com/v1/accounts:sendVerificationCode")
+      .query({ key: "fake-api-key" })
+      .send({ phoneNumber, recaptchaToken: "ignored" })
+      .then((res) => {
+        expectStatusCode(400, res);
+        expect(res.body.error)
+          .to.have.property("message")
+          .equals("UNSUPPORTED_PASSTHROUGH_OPERATION");
+      });
+  });
+
+  it("should error on sendVerificationCode if auth is disabled", async () => {
+    const tenant = await registerTenant(authApi(), PROJECT_ID, { disableAuth: true });
+
+    await authApi()
+      .post("/identitytoolkit.googleapis.com/v1/accounts:sendVerificationCode")
+      .query({ key: "fake-api-key" })
+      .send({ tenantId: tenant.tenantId })
+      .then((res) => {
+        expectStatusCode(400, res);
+        expect(res.body.error).to.have.property("message").equals("PROJECT_DISABLED");
+      });
+  });
+
+  it("should error on sendVerificationCode for tenant projects", async () => {
+    const tenant = await registerTenant(authApi(), PROJECT_ID, { disableAuth: false });
+
+    await authApi()
+      .post("/identitytoolkit.googleapis.com/v1/accounts:sendVerificationCode")
+      .query({ key: "fake-api-key" })
+      .send({ tenantId: tenant.tenantId })
+      .then((res) => {
+        expectStatusCode(400, res);
+        expect(res.body.error).to.have.property("message").equals("UNSUPPORTED_TENANT_OPERATION");
       });
   });
 
@@ -249,6 +297,67 @@ describeAuthEmulator("phone auth sign-in", ({ authApi }) => {
       });
   });
 
+  it("should error when linking phone number to existing user with MFA", async () => {
+    const user = {
+      email: "alice@example.com",
+      password: "notasecret",
+      mfaInfo: [TEST_MFA_INFO],
+    };
+    const { idToken } = await registerUser(authApi(), user);
+
+    const phoneNumber = TEST_PHONE_NUMBER;
+    const sessionInfo = await authApi()
+      .post("/identitytoolkit.googleapis.com/v1/accounts:sendVerificationCode")
+      .query({ key: "fake-api-key" })
+      .send({ phoneNumber, recaptchaToken: "ignored" })
+      .then((res) => {
+        expectStatusCode(200, res);
+        return res.body.sessionInfo as string;
+      });
+
+    const codes = await inspectVerificationCodes(authApi());
+    const code = codes[0].code;
+
+    await authApi()
+      .post("/identitytoolkit.googleapis.com/v1/accounts:signInWithPhoneNumber")
+      .query({ key: "fake-api-key" })
+      .send({ sessionInfo, code, idToken })
+      .then((res) => {
+        expectStatusCode(400, res);
+        expect(res.body.error.message).to.equal(
+          "UNSUPPORTED_FIRST_FACTOR : A phone number cannot be set as a first factor on an SMS based MFA user."
+        );
+      });
+  });
+
+  it("should error if user has MFA", async () => {
+    const phoneNumber = TEST_PHONE_NUMBER;
+    let { idToken, localId } = await registerUser(authApi(), {
+      email: "alice@example.com",
+      password: "notasecret",
+    });
+    await updateAccountByLocalId(authApi(), localId, {
+      emailVerified: true,
+      phoneNumber,
+    });
+    ({ idToken } = await enrollPhoneMfa(authApi(), idToken, TEST_PHONE_NUMBER_2));
+
+    await authApi()
+      .post("/identitytoolkit.googleapis.com/v1/accounts:sendVerificationCode")
+      .query({ key: "fake-api-key" })
+      .send({ phoneNumber })
+      .then((res) => {
+        expectStatusCode(400, res);
+        expect(res.body.error.message).to.equal(
+          "UNSUPPORTED_FIRST_FACTOR : A phone number cannot be set as a first factor on an SMS based MFA user."
+        );
+        return res.body.sessionInfo;
+      });
+
+    const codes = await inspectVerificationCodes(authApi());
+    expect(codes).to.be.empty;
+  });
+
   it("should return temporaryProof if phone number already belongs to another account", async () => {
     // Given a phone number that is already registered...
     const phoneNumber = TEST_PHONE_NUMBER;
@@ -292,6 +401,58 @@ describeAuthEmulator("phone auth sign-in", ({ authApi }) => {
       .then((res) => {
         expectStatusCode(400, res);
         expect(res.body.error).to.have.property("message").equals("PHONE_NUMBER_EXISTS");
+      });
+  });
+
+  it("should error on signInWithPhoneNumber if usageMode is passthrough", async () => {
+    const phoneNumber = TEST_PHONE_NUMBER;
+    const sessionInfo = await authApi()
+      .post("/identitytoolkit.googleapis.com/v1/accounts:sendVerificationCode")
+      .query({ key: "fake-api-key" })
+      .send({ phoneNumber, recaptchaToken: "ignored" })
+      .then((res) => {
+        expectStatusCode(200, res);
+        return res.body.sessionInfo;
+      });
+    const codes = await inspectVerificationCodes(authApi());
+    const code = codes[0].code;
+    await updateProjectConfig(authApi(), { usageMode: "PASSTHROUGH" });
+
+    await authApi()
+      .post("/identitytoolkit.googleapis.com/v1/accounts:signInWithPhoneNumber")
+      .query({ key: "fake-api-key" })
+      .send({ sessionInfo, code })
+      .then((res) => {
+        expectStatusCode(400, res);
+        expect(res.body.error)
+          .to.have.property("message")
+          .equals("UNSUPPORTED_PASSTHROUGH_OPERATION");
+      });
+  });
+
+  it("should error if auth is disabled", async () => {
+    const tenant = await registerTenant(authApi(), PROJECT_ID, { disableAuth: true });
+
+    await authApi()
+      .post("/identitytoolkit.googleapis.com/v1/accounts:signInWithPhoneNumber")
+      .query({ key: "fake-api-key" })
+      .send({ tenantId: tenant.tenantId })
+      .then((res) => {
+        expectStatusCode(400, res);
+        expect(res.body.error).to.have.property("message").equals("PROJECT_DISABLED");
+      });
+  });
+
+  it("should error if called on tenant project", async () => {
+    const tenant = await registerTenant(authApi(), PROJECT_ID, { disableAuth: false });
+
+    await authApi()
+      .post("/identitytoolkit.googleapis.com/v1/accounts:signInWithPhoneNumber")
+      .query({ key: "fake-api-key" })
+      .send({ tenantId: tenant.tenantId })
+      .then((res) => {
+        expectStatusCode(400, res);
+        expect(res.body.error).to.have.property("message").equals("UNSUPPORTED_TENANT_OPERATION");
       });
   });
 });

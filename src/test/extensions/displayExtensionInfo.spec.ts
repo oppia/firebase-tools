@@ -34,19 +34,20 @@ const SPEC = {
 describe("displayExtensionInfo", () => {
   describe("displayExtInfo", () => {
     it("should display info during install", () => {
-      const loggedLines = displayExtensionInfo.displayExtInfo(SPEC.name, SPEC);
-      const expected: string[] = [
-        "**Name**: Old",
-        "**Author**: Tester (**[firebase.google.com](firebase.google.com)**)",
-        "**Description**: descriptive",
-      ];
+      const loggedLines = displayExtensionInfo.displayExtInfo(SPEC.name, "", SPEC);
+      const expected: string[] = ["**Name**: Old", "**Description**: descriptive"];
       expect(loggedLines).to.eql(expected);
     });
     it("should display additional information for a published extension", () => {
-      const loggedLines = displayExtensionInfo.displayExtInfo(SPEC.name, SPEC, true);
+      const loggedLines = displayExtensionInfo.displayExtInfo(
+        SPEC.name,
+        "testpublisher",
+        SPEC,
+        true
+      );
       const expected: string[] = [
         "**Name**: Old",
-        "**Author**: Tester (**[firebase.google.com](firebase.google.com)**)",
+        "**Publisher**: testpublisher",
         "**Description**: descriptive",
         "**License**: MIT",
         "**Source code**: test.com",
@@ -106,11 +107,16 @@ describe("displayExtensionInfo", () => {
       const newSpec = _.cloneDeep(SPEC);
       newSpec.license = "To Kill";
 
-      expect(displayExtensionInfo.displayUpdateChangesRequiringConfirmation(SPEC, newSpec)).not.to
-        .be.rejected;
+      expect(
+        displayExtensionInfo.displayUpdateChangesRequiringConfirmation({
+          spec: SPEC,
+          newSpec,
+          nonInteractive: false,
+          force: false,
+        })
+      ).not.to.be.rejected;
 
       expect(promptStub.callCount).to.equal(1);
-      expect(promptStub.firstCall.args[0].message).to.contain("To Kill");
     });
 
     it("should prompt for changes to apis and continue if user gives consent", () => {
@@ -121,12 +127,16 @@ describe("displayExtensionInfo", () => {
         { apiName: "api3", reason: "" },
       ];
 
-      expect(displayExtensionInfo.displayUpdateChangesRequiringConfirmation(SPEC, newSpec)).not.to
-        .be.rejected;
+      expect(
+        displayExtensionInfo.displayUpdateChangesRequiringConfirmation({
+          spec: SPEC,
+          newSpec,
+          nonInteractive: false,
+          force: false,
+        })
+      ).not.to.be.rejected;
 
       expect(promptStub.callCount).to.equal(1);
-      expect(promptStub.firstCall.args[0].message).to.contain("- api1");
-      expect(promptStub.firstCall.args[0].message).to.contain("+ api3");
     });
 
     it("should prompt for changes to roles and continue if user gives consent", () => {
@@ -137,12 +147,16 @@ describe("displayExtensionInfo", () => {
         { role: "role3", reason: "" },
       ];
 
-      expect(displayExtensionInfo.displayUpdateChangesRequiringConfirmation(SPEC, newSpec)).not.to
-        .be.rejected;
+      expect(
+        displayExtensionInfo.displayUpdateChangesRequiringConfirmation({
+          spec: SPEC,
+          newSpec,
+          nonInteractive: false,
+          force: false,
+        })
+      ).not.to.be.rejected;
 
       expect(promptStub.callCount).to.equal(1);
-      expect(promptStub.firstCall.args[0].message).to.contain("- role1");
-      expect(promptStub.firstCall.args[0].message).to.contain("+ role3");
     });
 
     it("should prompt for changes to resources and continue if user gives consent", () => {
@@ -153,14 +167,16 @@ describe("displayExtensionInfo", () => {
         { name: "resource2", type: "other", description: "" },
       ];
 
-      expect(displayExtensionInfo.displayUpdateChangesRequiringConfirmation(SPEC, newSpec)).not.to
-        .be.rejected;
+      expect(
+        displayExtensionInfo.displayUpdateChangesRequiringConfirmation({
+          spec: SPEC,
+          newSpec,
+          nonInteractive: false,
+          force: false,
+        })
+      ).not.to.be.rejected;
 
       expect(promptStub.callCount).to.equal(1);
-      expect(promptStub.firstCall.args[0].message).to.contain("- resource1");
-      expect(promptStub.firstCall.args[0].message).to.contain("desc");
-      expect(promptStub.firstCall.args[0].message).to.contain("+ resource3");
-      expect(promptStub.firstCall.args[0].message).to.contain("new desc");
     });
 
     it("should prompt for changes to resources and continue if user gives consent", () => {
@@ -168,13 +184,16 @@ describe("displayExtensionInfo", () => {
       const oldSpec = _.cloneDeep(SPEC);
       oldSpec.billingRequired = false;
 
-      expect(displayExtensionInfo.displayUpdateChangesRequiringConfirmation(oldSpec, SPEC)).not.to
-        .be.rejected;
+      expect(
+        displayExtensionInfo.displayUpdateChangesRequiringConfirmation({
+          spec: oldSpec,
+          newSpec: SPEC,
+          nonInteractive: false,
+          force: false,
+        })
+      ).not.to.be.rejected;
 
       expect(promptStub.callCount).to.equal(1);
-      expect(promptStub.firstCall.args[0].message).to.contain(
-        "Billing is now required for the new version of this extension. Would you like to continue?"
-      );
     });
 
     it("should exit if the user consents to one change but rejects another", () => {
@@ -188,10 +207,15 @@ describe("displayExtensionInfo", () => {
       ];
 
       expect(
-        displayExtensionInfo.displayUpdateChangesRequiringConfirmation(SPEC, newSpec)
+        displayExtensionInfo.displayUpdateChangesRequiringConfirmation({
+          spec: SPEC,
+          newSpec,
+          nonInteractive: false,
+          force: false,
+        })
       ).to.be.rejectedWith(
         FirebaseError,
-        "Without explicit consent for the change to license, we cannot update this extension instance."
+        "Unable to update this extension instance without explicit consent for the change to 'License'"
       );
 
       expect(promptStub.callCount).to.equal(1);
@@ -203,10 +227,15 @@ describe("displayExtensionInfo", () => {
       newSpec.license = "new";
 
       expect(
-        displayExtensionInfo.displayUpdateChangesRequiringConfirmation(SPEC, newSpec)
+        displayExtensionInfo.displayUpdateChangesRequiringConfirmation({
+          spec: SPEC,
+          newSpec,
+          nonInteractive: false,
+          force: false,
+        })
       ).to.be.rejectedWith(
         FirebaseError,
-        "Without explicit consent for the change to license, we cannot update this extension instance."
+        "Unable to update this extension instance without explicit consent for the change to 'License'."
       );
     });
 
@@ -215,7 +244,12 @@ describe("displayExtensionInfo", () => {
       const newSpec = _.cloneDeep(SPEC);
       newSpec.version = "1.1.0";
 
-      await displayExtensionInfo.displayUpdateChangesRequiringConfirmation(SPEC, newSpec);
+      await displayExtensionInfo.displayUpdateChangesRequiringConfirmation({
+        spec: SPEC,
+        newSpec,
+        nonInteractive: false,
+        force: false,
+      });
 
       expect(promptStub).not.to.have.been.called;
     });

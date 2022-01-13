@@ -2,7 +2,7 @@ import * as clc from "cli-color";
 import * as childProcess from "child_process";
 
 import * as controller from "../emulator/controller";
-import * as Config from "../config";
+import { Config } from "../config";
 import * as utils from "../utils";
 import { logger } from "../logger";
 import * as path from "path";
@@ -13,8 +13,8 @@ import { Emulators, ALL_SERVICE_EMULATORS } from "./types";
 import { FirebaseError } from "../error";
 import { EmulatorRegistry } from "./registry";
 import { FirestoreEmulator } from "./firestoreEmulator";
-import * as getProjectId from "../getProjectId";
-import { prompt } from "../prompt";
+import { getProjectId } from "../projectUtils";
+import { promptOnce } from "../prompt";
 import { onExit } from "./controller";
 import * as fsutils from "../fsutils";
 import Signals = NodeJS.Signals;
@@ -110,14 +110,11 @@ export function warnEmulatorNotSupported(
     const opts = {
       confirm: undefined,
     };
-    return prompt(opts, [
-      {
-        type: "confirm",
-        name: "confirm",
-        default: false,
-        message: "Do you want to continue?",
-      },
-    ]).then(() => {
+    return promptOnce({
+      type: "confirm",
+      default: false,
+      message: "Do you want to continue?",
+    }).then((confirm: boolean) => {
       if (!opts.confirm) {
         return utils.reject("Command aborted.", { exit: 1 });
       }
@@ -142,7 +139,7 @@ export async function beforeEmulatorCommand(options: any): Promise<any> {
 
   try {
     await requireAuth(options);
-  } catch (e) {
+  } catch (e: any) {
     logger.debug(e);
     utils.logLabeledWarning(
       "emulators",
@@ -287,7 +284,7 @@ function processKillSignal(
         }
       }
       res();
-    } catch (e) {
+    } catch (e: any) {
       logger.debug(e);
       rej();
     }
@@ -332,6 +329,15 @@ async function runScript(script: string, extraEnv: Record<string, string>): Prom
 
     env[Constants.FIRESTORE_EMULATOR_HOST] = address;
     env[FirestoreEmulator.FIRESTORE_EMULATOR_ENV_ALT] = address;
+  }
+
+  const storageInstance = EmulatorRegistry.get(Emulators.STORAGE);
+  if (storageInstance) {
+    const info = storageInstance.getInfo();
+    const address = EmulatorRegistry.getInfoHostString(info);
+
+    env[Constants.FIREBASE_STORAGE_EMULATOR_HOST] = address;
+    env[Constants.CLOUD_STORAGE_EMULATOR_HOST] = `http://${address}`;
   }
 
   const authInstance = EmulatorRegistry.get(Emulators.AUTH);
@@ -398,7 +404,7 @@ async function runScript(script: string, extraEnv: Record<string, string>): Prom
  */
 export async function emulatorExec(script: string, options: any) {
   shutdownWhenKilled(options);
-  const projectId = getProjectId(options, true);
+  const projectId = getProjectId(options);
   const extraEnv: Record<string, string> = {};
   if (projectId) {
     extraEnv.GCLOUD_PROJECT = projectId;
