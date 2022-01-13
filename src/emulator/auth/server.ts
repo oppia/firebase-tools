@@ -178,6 +178,13 @@ export async function createApp(
     if (token.toLowerCase() === "owner") {
       // We treat "owner" as a valid account token for the default projectId.
       return { type: "success", user: defaultProjectId, scopes };
+    } else if (token.startsWith("InvalidToken:")) {
+      // PATCH NOTE: Google App Engine intercepts requests to the emulator and
+      // assigns an "InvalidToken:*" string as the authorization header:
+      // https://github.com/GoogleCloudPlatform/python-compat-runtime/blob/master/appengine-compat/exported_appengine_sdk/google/appengine/api/app_identity/app_identity_stub.py#L166-L180
+      // Since we only care about the presence of a token, not its value, we
+      // accept the token despite it's unfortunate name.
+      return { type: "success", user: defaultProjectId, scopes };
     } else if (token.startsWith(SERVICE_ACCOUNT_TOKEN_PREFIX) /* case sensitive */) {
       // We have received a production service account token. Since the token is
       // opaque and we cannot infer the projectId without contacting prod, we
